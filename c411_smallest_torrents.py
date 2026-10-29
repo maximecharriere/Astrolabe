@@ -22,6 +22,7 @@ Config (env vars, or a .env file next to this script):
   QBIT_CATEGORY      optional, overrides the category mapping above
   QBIT_SAVEPATH      optional (overrides the category's paths)
 """
+
 import argparse
 import os
 import sys
@@ -35,7 +36,17 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).with_name(".env"))
 
 # c411 category id -> qBittorrent category
-CATEGORIES = {1: "movies", 2: "books", 3: "music", 4: "software", 5: "games"}
+CATEGORIES = {
+    1: "movies",
+    2: "books",
+    3: "music",
+    4: "software",
+    5: "games",
+    6: "emulation",
+    7: "gps",
+    9: "nulled",
+    10: "3d",
+}
 
 
 def env(name, default=None, required=False):
@@ -55,6 +66,13 @@ def site_headers():
     return h
 
 
+def human_size(n):
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if n < 1024 or unit == "TiB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.2f} {unit}"
+        n /= 1024
+
+
 def parse_category(value):
     """Accept a c411 id ("2") or a qBittorrent category name ("books")."""
     if value.isdigit() and int(value) in CATEGORIES:
@@ -63,7 +81,9 @@ def parse_category(value):
         if value.lower() == name:
             return cid
     choices = ", ".join(f"{cid}={name}" for cid, name in CATEGORIES.items())
-    raise argparse.ArgumentTypeError(f"unknown category {value!r} (choose from {choices})")
+    raise argparse.ArgumentTypeError(
+        f"unknown category {value!r} (choose from {choices})"
+    )
 
 
 def fetch_site(category, count, per_page, min_size, delay, headers):
@@ -72,9 +92,18 @@ def fetch_site(category, count, per_page, min_size, delay, headers):
     tpl = env("C411_DOWNLOAD_URL", f"{base}/api/torrents/{{hash}}/download")
     items, seen, page = [], set(), 1
     while len(items) < count:
-        r = requests.get(f"{base}/api/torrents", headers=headers, timeout=60,
-                         params={"page": page, "perPage": per_page, "sortBy": "size",
-                                 "sortOrder": "asc", "category": category})
+        r = requests.get(
+            f"{base}/api/torrents",
+            headers=headers,
+            timeout=60,
+            params={
+                "page": page,
+                "perPage": per_page,
+                "sortBy": "size",
+                "sortOrder": "asc",
+                "category": category,
+            },
+        )
         try:
             r.raise_for_status()
             data = r.json()["data"]
@@ -86,8 +115,14 @@ def fetch_site(category, count, per_page, min_size, delay, headers):
             if t["id"] in seen or t["size"] < min_size:
                 continue
             seen.add(t["id"])
-            items.append({"title": t["name"], "size": t["size"], "hash": t["infoHash"].lower(),
-                          "link": tpl.format(id=t["id"], hash=t["infoHash"])})
+            items.append(
+                {
+                    "title": t["name"],
+                    "size": t["size"],
+                    "hash": t["infoHash"].lower(),
+                    "link": tpl.format(id=t["id"], hash=t["infoHash"]),
+                }
+            )
         print(f"page {page}: total {len(items)}", file=sys.stderr)
         page += 1
         time.sleep(delay)
@@ -99,7 +134,9 @@ class QBit:
         self.url = url.rstrip("/")
         self.s = requests.Session()
         self.s.headers["Referer"] = self.url
-        r = self.s.post(f"{self.url}/api/v2/auth/login", data={"username": user, "password": pw})
+        r = self.s.post(
+            f"{self.url}/api/v2/auth/login", data={"username": user, "password": pw}
+        )
         # 200 "Ok." on older versions, 204 on newer ones / when auth is bypassed for the subnet
         if not (r.status_code == 204 or r.text.strip() == "Ok."):
             sys.exit(f"qBittorrent login failed: {r.status_code} {r.text}")
@@ -118,8 +155,13 @@ class QBit:
         else:
             # Automatic Torrent Management: use the category's save/incomplete paths
             data["autoTMM"] = "true"
-        r = self.s.post(f"{self.url}/api/v2/torrents/add", data=data,
-                        files={"torrents": ("x.torrent", torrent_bytes, "application/x-bittorrent")})
+        r = self.s.post(
+            f"{self.url}/api/v2/torrents/add",
+            data=data,
+            files={
+                "torrents": ("x.torrent", torrent_bytes, "application/x-bittorrent")
+            },
+        )
         # 4.x: 200 "Ok." / 200 "Fails."; 5.x: 2xx on success, 409 if already present
         if r.status_code == 409:
             return "exists"
@@ -130,23 +172,41 @@ class QBit:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("-c", "--category", type=parse_category, default=2,
-                    help="c411 category: 1/movies, 2/books, 3/music, 4/software, 5/games (default books)")
+    ap.add_argument(
+        "-c",
+        "--category",
+        type=parse_category,
+        default=2,
+        help="c411 category: 1/movies, 2/books, 3/music, 4/software, 5/games (default books)",
+    )
     ap.add_argument("-n", "--count", type=int, default=10)
-    ap.add_argument("--min-size", type=int, default=1, help="ignore items smaller than this many bytes")
+    ap.add_argument(
+        "--min-size",
+        type=int,
+        default=1,
+        help="ignore items smaller than this many bytes",
+    )
     ap.add_argument("--page-size", type=int, default=50)
     ap.add_argument("--delay", type=float, default=1.0, help="seconds between requests")
     ap.add_argument("--paused", action="store_true", help="add torrents paused")
-    ap.add_argument("--go", action="store_true", help="actually add to qBittorrent (default: dry run)")
+    ap.add_argument(
+        "--go",
+        action="store_true",
+        help="actually add to qBittorrent (default: dry run)",
+    )
     a = ap.parse_args()
 
     headers = site_headers()
     qbit_category = env("QBIT_CATEGORY") or CATEGORIES[a.category]
     items = fetch_site(a.category, a.count, a.page_size, a.min_size, a.delay, headers)
 
-    print(f"\n{len(items)} smallest items in c411 category {a.category} -> qBittorrent '{qbit_category}':")
+    print(
+        f"\n{len(items)} smallest items in c411 category {a.category} -> qBittorrent '{qbit_category}':"
+    )
     for i in items:
         print(f"{i['size']:>12}  {i['title']}")
+    total = sum(i["size"] for i in items)
+    print(f"\nTotal size: {human_size(total)} ({total} bytes)")
     if not a.go:
         print("\nDry run. Re-run with --go to add them to qBittorrent.")
         return
