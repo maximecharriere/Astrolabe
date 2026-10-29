@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Send the N smallest ebooks from c411 to qBittorrent.
+"""Send the N smallest torrents of a c411 category to qBittorrent.
 
 Lists torrents with c411's /api/torrents endpoint (sorted by size server-side) and
 downloads each .torrent from /api/torrents/{hash}/download, which needs a logged-in
@@ -7,16 +7,19 @@ browser cookie (the API key alone gets a 401 there).
 
 Dry-run by default: pass --go to actually add to qBittorrent.
 
+Pick the c411 category with -c/--category (id or qBittorrent name, default books):
+  1 movies, 2 books, 3 music, 4 software, 5 games
+Each torrent gets the matching qBittorrent category, so its save path follows that category.
+
 Config (env vars, or a .env file next to this script):
   C411_BASE          default https://c411.org
   C411_COOKIE        full Cookie header copied from a logged-in browser
   C411_USER_AGENT    must match the browser's UA if the cookie includes cf_clearance
   C411_APIKEY        optional, sent as Bearer token
   C411_DOWNLOAD_URL  template with {id} / {hash} placeholders
-  C411_CATEGORY      default 2 (Ebook)
   QBIT_URL           e.g. http://localhost:8080
   QBIT_USER / QBIT_PASS
-  QBIT_CATEGORY      default "books"
+  QBIT_CATEGORY      optional, overrides the category mapping above
   QBIT_SAVEPATH      optional (overrides the category's paths)
 """
 import argparse
@@ -30,6 +33,9 @@ from dotenv import load_dotenv
 
 # Read settings from .env next to this script (real env vars take precedence)
 load_dotenv(Path(__file__).with_name(".env"))
+
+# c411 category id -> qBittorrent category
+CATEGORIES = {1: "movies", 2: "books", 3: "music", 4: "software", 5: "games"}
 
 
 def env(name, default=None, required=False):
@@ -49,7 +55,18 @@ def site_headers():
     return h
 
 
-def fetch_site(count, per_page, min_size, delay, headers):
+def parse_category(value):
+    """Accept a c411 id ("2") or a qBittorrent category name ("books")."""
+    if value.isdigit() and int(value) in CATEGORIES:
+        return int(value)
+    for cid, name in CATEGORIES.items():
+        if value.lower() == name:
+            return cid
+    choices = ", ".join(f"{cid}={name}" for cid, name in CATEGORIES.items())
+    raise argparse.ArgumentTypeError(f"unknown category {value!r} (choose from {choices})")
+
+
+def fetch_site(category, count, per_page, min_size, delay, headers):
     """Use c411's own listing endpoint, which sorts by size server-side."""
     base = env("C411_BASE", "https://c411.org").rstrip("/")
     tpl = env("C411_DOWNLOAD_URL", f"{base}/api/torrents/{{hash}}/download")
@@ -57,7 +74,7 @@ def fetch_site(count, per_page, min_size, delay, headers):
     while len(items) < count:
         r = requests.get(f"{base}/api/torrents", headers=headers, timeout=60,
                          params={"page": page, "perPage": per_page, "sortBy": "size",
-                                 "sortOrder": "asc", "category": env("C411_CATEGORY", "2")})
+                                 "sortOrder": "asc", "category": category})
         try:
             r.raise_for_status()
             data = r.json()["data"]
@@ -113,6 +130,8 @@ class QBit:
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("-c", "--category", type=parse_category, default=2,
+                    help="c411 category: 1/movies, 2/books, 3/music, 4/software, 5/games (default books)")
     ap.add_argument("-n", "--count", type=int, default=10)
     ap.add_argument("--min-size", type=int, default=1, help="ignore items smaller than this many bytes")
     ap.add_argument("--page-size", type=int, default=50)
@@ -122,9 +141,10 @@ def main():
     a = ap.parse_args()
 
     headers = site_headers()
-    items = fetch_site(a.count, a.page_size, a.min_size, a.delay, headers)
+    qbit_category = env("QBIT_CATEGORY") or CATEGORIES[a.category]
+    items = fetch_site(a.category, a.count, a.page_size, a.min_size, a.delay, headers)
 
-    print(f"\n{len(items)} smallest items:")
+    print(f"\n{len(items)} smallest items in c411 category {a.category} -> qBittorrent '{qbit_category}':")
     for i in items:
         print(f"{i['size']:>12}  {i['title']}")
     if not a.go:
@@ -143,7 +163,7 @@ def main():
             r.raise_for_status()
             if not r.content.startswith(b"d"):  # not a bencoded .torrent
                 raise ValueError("response is not a .torrent file")
-            res = q.add(r.content, env("QBIT_CATEGORY", "books"), env("QBIT_SAVEPATH"), a.paused)
+            res = q.add(r.content, qbit_category, env("QBIT_SAVEPATH"), a.paused)
             if res == "added":
                 ok += 1
             elif res == "exists":
